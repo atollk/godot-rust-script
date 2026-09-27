@@ -450,6 +450,14 @@ impl IScriptExtension for RustScript {
             Vec::with_capacity(0)
         };
 
+        // NOTE: Re-assigning the script below (`set_script`) synchronously re-enters
+        // `RustScript::instance_create_rawptr`, which needs its own (shared) bind of `self`.
+        // Since `reload()` is called with an exclusive (`&mut self`) bind already held for the
+        // whole duration of this call, doing that synchronously panics with a "already bound"
+        // error. Deferring the calls lets them run after `reload()` has returned and released
+        // its bind.
+        let self_gd = self.downgrade_gd(|self_gd| self_gd);
+
         owners.iter().for_each(|owner_id| {
             let mut object: Gd<Object> = match Gd::try_from_instance_id(*owner_id) {
                 Ok(owner) => owner,
@@ -459,14 +467,15 @@ impl IScriptExtension for RustScript {
                 }
             };
 
-            let property_backup: Vec<_> = if keep_state {
+            let property_backup: Vec<(StringName, Variant)> = if keep_state {
                 exported_properties_list
                     .iter()
                     .flatten()
                     .map(|key| {
-                        let value = object.get(key.as_ref());
+                        let key = StringName::from(key.as_ref());
+                        let value = object.get(&key);
 
-                        (key.as_ref(), value)
+                        (key, value)
                     })
                     .collect()
             } else {
@@ -474,18 +483,16 @@ impl IScriptExtension for RustScript {
             };
 
             // Clear script to destroy script instance.
-            object.set_script(Option::<&Gd<Script>>::None);
+            object.call_deferred("set_script", &[Variant::nil()]);
 
-            self.downgrade_gd(|self_gd| {
-                // Reassign script to create new instance.
-                object.set_script(Some(&self_gd));
+            // Reassign script to create new instance.
+            object.call_deferred("set_script", &[self_gd.to_variant()]);
 
-                if keep_state {
-                    property_backup.into_iter().for_each(|(key, value)| {
-                        object.set(key, &value);
-                    });
-                }
-            })
+            if keep_state {
+                property_backup.into_iter().for_each(|(key, value)| {
+                    object.call_deferred("set", &[key.to_variant(), value]);
+                });
+            }
         });
 
         godot::global::Error::OK
