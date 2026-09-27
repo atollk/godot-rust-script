@@ -200,6 +200,25 @@ impl IScriptExtension for RustScript {
     }
 
     unsafe fn instance_create_rawptr(&self, mut for_object: Gd<Object>) -> RawPtr<*mut c_void> {
+        let expected_base_type = self.get_instance_base_type();
+        let actual_class = for_object.get_class();
+
+        if StringName::from(&actual_class) != expected_base_type
+            && !ClassDb::singleton()
+                .is_parent_class(&StringName::from(&actual_class), &expected_base_type)
+        {
+            godot_error!(
+                "RustScript class \"{}\" expects a base type of \"{}\", but was attached to a \"{}\" node ({:?}).",
+                self.str_class_name(),
+                expected_base_type,
+                actual_class,
+                for_object
+            );
+
+            // SAFETY: Return null to signal that no script should be created.
+            return unsafe { RawPtr::null() };
+        }
+
         self.owners.borrow_mut().insert(for_object.instance_id());
 
         let data = self.create_remote_instance(for_object.clone());
